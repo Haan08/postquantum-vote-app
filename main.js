@@ -3,13 +3,15 @@ require('dotenv').config();
 
 const express = require('express');
 const bodyParser = require('body-parser');
-const mysql = require('mysql2');
+const MySQL = require('mysql2');
 const crypto = require('crypto');
 const path = require('path');
 const session = require('express-session');
-const nodemailer = require('nodemailer');
+const validator = require('validator');
+const { Resend } = require('resend');
 
 const app = express();
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 // ✅ Middleware
 app.use(bodyParser.urlencoded({ extended: true }));
@@ -40,7 +42,7 @@ function decrypt(encryptedText, keyHex) {
 }
 
 // ✅ MySQL
-const db = mysql.createConnection({
+const db = MySQL.createConnection({
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
   password: process.env.DB_PASS,
@@ -52,41 +54,39 @@ db.connect(err => {
   console.log("✅ Connected to MySQL");
 });
 
-function sendOTP(email, otp, res, successRedirect = null) {
-  const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-      user: process.env.GMAIL_USER,
-      pass: process.env.GMAIL_PASS
-    }
-  });
-
-  const mailOptions = {
-    from: process.env.GMAIL_USER,
+function sendOTP(email, otp, res) {
+  resend.emails.send({
+    from: process.env.RESEND_SENDER,
     to: email,
     subject: 'Your OTP for Voting',
     text: `Your OTP is ${otp}`
-  };
-
-  transporter.sendMail(mailOptions, (error, info) => {
-    if (error) {
-      console.error(error);
-      res.send('❌ Failed to send OTP. Please enter a valid email.');
-    } else {
-      if (successRedirect) {
-        res.redirect(successRedirect);
-      } else {
-        res.sendFile(path.join(__dirname, 'public', 'otp.html'));
-      }
-    }
+  }).then(() => {
+    console.log("✅ OTP Sent to", email);
+    res.sendFile(path.join(__dirname, 'public', 'otp.html'));
+  }).catch((error) => {
+    console.error("❌ Resend error:", error);
+    res.send('❌ Failed to send OTP. Please try again.');
   });
 }
 
 // ✅ OTP: Send OTP
 app.post('/send-otp', (req, res) => {
-  const email = req.body.email;
-  const otp = Math.floor(100000 + Math.random() * 900000);
+  console.log("🔥 Received body:", req.body);
 
+  const rawEmail = req.body.email;
+
+  if (!rawEmail || typeof rawEmail !== 'string') {
+    return res.send('❌ Email is missing. <a href="/verify.html">Try again</a>');
+  }
+
+  const email = rawEmail.trim().toLowerCase();
+  console.log("📩 Processed email:", email);
+
+  if (!validator.isEmail(email)) {
+    return res.send('❌ Invalid email address. <a href="/verify.html">Try again</a>');
+  }
+
+  const otp = Math.floor(100000 + Math.random() * 900000);
   req.session.email = email;
   req.session.otp = otp;
   req.session.otpTimestamp = Date.now();
@@ -119,7 +119,6 @@ app.post('/verify-otp', (req, res) => {
   if (parseInt(userOtp) === req.session.otp) {
     req.session.verified = true;
 
-    // Save verified email to DB
     db.query('INSERT IGNORE INTO verified_emails (email) VALUES (?)', [req.session.email], (err) => {
       if (err) console.error('❌ Failed to save verified email:', err);
     });
@@ -140,8 +139,8 @@ app.get('/vote.html', (req, res) => {
 app.post('/vote', (req, res) => {
   if (!req.session.verified) return res.redirect('/verify.html');
 
-  const { email, choice } = req.body;
-  const hashedEmail = crypto.createHash('sha256').update(email).digest('hex');
+  const { choice } = req.body;
+  const hashedEmail = crypto.createHash('sha256').update(req.session.email).digest('hex');
   const secret = process.env.AES_SECRET;
 
   db.query('SELECT * FROM votes WHERE email_hash = ?', [hashedEmail], (err, results) => {
@@ -149,7 +148,7 @@ app.post('/vote', (req, res) => {
     if (results.length > 0) {
       return res.send(`
         <div style="text-align:center;margin-top:50px;">
-          <h3>⚠️ You’ve already voted!</h3>
+          <h3>⚠ You’ve already voted!</h3>
           <a href="/verify.html" class="btn btn-warning mt-3">Back</a>
         </div>
       `);
@@ -206,7 +205,7 @@ app.get('/results-data', requireAdmin, (req, res) => {
         const decrypted = decrypt(row.choice, secret);
         if (counts[decrypted] !== undefined) counts[decrypted]++;
       } catch (e) {
-        console.error("⚠️ Decryption error:", e.message);
+        console.error("⚠ Decryption error:", e.message);
       }
     });
 

@@ -1,0 +1,16 @@
+# 📦 Node.js modules
+node_modules/
+
+# ⚙️ Environment config
+.env
+
+# 🧪 Logs
+*.log
+npm-debug.log*
+
+# 💻 VS Code settings (optional)
+.vscode/
+
+# 🗑 OS-specific files
+.DS_Store
+Thumbs.db
